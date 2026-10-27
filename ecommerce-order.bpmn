@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
+                  id="Definitions_Ecommerce"
+                  targetNamespace="http://bpmn.io/schema/bpmn"
+                  exporter="Camunda Modeler"
+                  exporterVersion="5.0.0">
+  <bpmn:message id="Message_OrderPlaced" name="orderPlaced" />
+
+  <bpmn:process id="Process_EcommerceOrder" name="E-Commerce Order Fulfillment"
+                isExecutable="true" camunda:historyTimeToLive="30">
+    <bpmn:documentation>
+      Proses fulfillment pesanan e-commerce: reservasi stok (web service),
+      persetujuan manajer (human task) dengan timer pengingat, pembayaran,
+      pengemasan, dan pengiriman. Termasuk exclusive gateway untuk stok habis.
+    </bpmn:documentation>
+
+    <bpmn:startEvent id="StartEvent_OrderPlaced" name="Pesanan diterima">
+      <bpmn:outgoing>Flow_Start_Reserve</bpmn:outgoing>
+      <bpmn:messageEventDefinition id="MessageEventDefinition_OrderPlaced" messageRef="Message_OrderPlaced" />
+    </bpmn:startEvent>
+
+    <bpmn:serviceTask id="ServiceTask_ReserveStock" name="Reservasi stok">
+      <bpmn:documentation>Web service task: memanggil inventory service untuk mereservasi stok.</bpmn:documentation>
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">http://mock-api:8081/inventory/reserve</camunda:inputParameter>
+            <camunda:inputParameter name="method">POST</camunda:inputParameter>
+            <camunda:inputParameter name="headers">
+              <camunda:map>
+                <camunda:entry key="Content-Type">application/json</camunda:entry>
+              </camunda:map>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="payload">{"orderId":"${orderId}","sku":"${sku}","qty":${qty}}</camunda:inputParameter>
+            <camunda:outputParameter name="reserveResponse">${response}</camunda:outputParameter>
+          </camunda:inputOutput>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_Start_Reserve</bpmn:incoming>
+      <bpmn:outgoing>Flow_Reserve_Gateway</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_StockAvailable" name="Stok tersedia?" default="Flow_OutOfStock_Cancel">
+      <bpmn:incoming>Flow_Reserve_Gateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_InStock_Approval</bpmn:outgoing>
+      <bpmn:outgoing>Flow_OutOfStock_Cancel</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:userTask id="UserTask_ManagerApproval" name="Persetujuan manajer" camunda:assignee="manager">
+      <bpmn:documentation>Human task: manajer menyetujui pesanan bernilai tinggi. Jika 20 detik tidak direspons, timer mengirim pengingat.</bpmn:documentation>
+      <bpmn:incoming>Flow_InStock_Approval</bpmn:incoming>
+      <bpmn:outgoing>Flow_Approval_Charge</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <bpmn:boundaryEvent id="BoundaryEvent_ApprovalTimeout" name="Pengingat 20 detik"
+                        attachedToRef="UserTask_ManagerApproval" cancelActivity="false">
+      <bpmn:outgoing>Flow_Timeout_Reminder</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TimerEventDefinition_ApprovalTimeout">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">PT20S</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:boundaryEvent>
+
+    <bpmn:serviceTask id="ServiceTask_SendReminder" name="Kirim pengingat approval">
+      <bpmn:documentation>Web service task: mengirim notifikasi pengingat ke manajer.</bpmn:documentation>
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">http://mock-api:8081/notification/reminder</camunda:inputParameter>
+            <camunda:inputParameter name="method">POST</camunda:inputParameter>
+            <camunda:inputParameter name="headers">
+              <camunda:map>
+                <camunda:entry key="Content-Type">application/json</camunda:entry>
+              </camunda:map>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="payload">{"orderId":"${orderId}","message":"Menunggu persetujuan manajer"}</camunda:inputParameter>
+            <camunda:outputParameter name="reminderResponse">${response}</camunda:outputParameter>
+          </camunda:inputOutput>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_Timeout_Reminder</bpmn:incoming>
+      <bpmn:outgoing>Flow_Reminder_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_ChargePayment" name="Proses pembayaran">
+      <bpmn:documentation>Web service task: menagih pembayaran ke payment gateway.</bpmn:documentation>
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">http://mock-api:8081/payment/charge</camunda:inputParameter>
+            <camunda:inputParameter name="method">POST</camunda:inputParameter>
+            <camunda:inputParameter name="headers">
+              <camunda:map>
+                <camunda:entry key="Content-Type">application/json</camunda:entry>
+              </camunda:map>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="payload">{"orderId":"${orderId}","amount":${amount}}</camunda:inputParameter>
+            <camunda:outputParameter name="paymentResponse">${response}</camunda:outputParameter>
+          </camunda:inputOutput>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_Approval_Charge</bpmn:incoming>
+      <bpmn:outgoing>Flow_Charge_Packing</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:userTask id="UserTask_WarehousePacking" name="Pengemasan barang" camunda:assignee="warehouse">
+      <bpmn:documentation>Human task: staf gudang mengemas barang dan menandai pesanan siap kirim.</bpmn:documentation>
+      <bpmn:incoming>Flow_Charge_Packing</bpmn:incoming>
+      <bpmn:outgoing>Flow_Packing_Ship</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <bpmn:serviceTask id="ServiceTask_ShipOrder" name="Pengiriman pesanan">
+      <bpmn:documentation>Web service task: membuat booking pengiriman di logistik.</bpmn:documentation>
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">http://mock-api:8081/shipment/book</camunda:inputParameter>
+            <camunda:inputParameter name="method">POST</camunda:inputParameter>
+            <camunda:inputParameter name="headers">
+              <camunda:map>
+                <camunda:entry key="Content-Type">application/json</camunda:entry>
+              </camunda:map>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="payload">{"orderId":"${orderId}","sku":"${sku}","qty":${qty}}</camunda:inputParameter>
+            <camunda:outputParameter name="shipmentResponse">${response}</camunda:outputParameter>
+          </camunda:inputOutput>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_Packing_Ship</bpmn:incoming>
+      <bpmn:outgoing>Flow_Ship_Completed</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_CancelOrder" name="Batalkan pesanan">
+      <bpmn:documentation>Web service task: melepas reservasi stok dan membatalkan pesanan.</bpmn:documentation>
+      <bpmn:extensionElements>
+        <camunda:connector>
+          <camunda:connectorId>http-connector</camunda:connectorId>
+          <camunda:inputOutput>
+            <camunda:inputParameter name="url">http://mock-api:8081/inventory/release</camunda:inputParameter>
+            <camunda:inputParameter name="method">POST</camunda:inputParameter>
+            <camunda:inputParameter name="headers">
+              <camunda:map>
+                <camunda:entry key="Content-Type">application/json</camunda:entry>
+              </camunda:map>
+            </camunda:inputParameter>
+            <camunda:inputParameter name="payload">{"orderId":"${orderId}","reason":"stok-habis"}</camunda:inputParameter>
+            <camunda:outputParameter name="cancelResponse">${response}</camunda:outputParameter>
+          </camunda:inputOutput>
+        </camunda:connector>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_OutOfStock_Cancel</bpmn:incoming>
+      <bpmn:outgoing>Flow_Cancel_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_Completed" name="Pesanan selesai">
+      <bpmn:incoming>Flow_Ship_Completed</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:endEvent id="EndEvent_Cancelled" name="Pesanan dibatalkan">
+      <bpmn:incoming>Flow_Cancel_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:endEvent id="EndEvent_ReminderSent" name="Pengingat terkirim">
+      <bpmn:incoming>Flow_Reminder_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="Flow_Start_Reserve" sourceRef="StartEvent_OrderPlaced" targetRef="ServiceTask_ReserveStock" />
+    <bpmn:sequenceFlow id="Flow_Reserve_Gateway" sourceRef="ServiceTask_ReserveStock" targetRef="Gateway_StockAvailable" />
+    <bpmn:sequenceFlow id="Flow_InStock_Approval" name="Stok tersedia" sourceRef="Gateway_StockAvailable" targetRef="UserTask_ManagerApproval">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${stockAvailable}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_OutOfStock_Cancel" name="Stok habis" sourceRef="Gateway_StockAvailable" targetRef="ServiceTask_CancelOrder" />
+    <bpmn:sequenceFlow id="Flow_Approval_Charge" sourceRef="UserTask_ManagerApproval" targetRef="ServiceTask_ChargePayment" />
+    <bpmn:sequenceFlow id="Flow_Charge_Packing" sourceRef="ServiceTask_ChargePayment" targetRef="UserTask_WarehousePacking" />
+    <bpmn:sequenceFlow id="Flow_Packing_Ship" sourceRef="UserTask_WarehousePacking" targetRef="ServiceTask_ShipOrder" />
+    <bpmn:sequenceFlow id="Flow_Ship_Completed" sourceRef="ServiceTask_ShipOrder" targetRef="EndEvent_Completed" />
+    <bpmn:sequenceFlow id="Flow_Cancel_End" sourceRef="ServiceTask_CancelOrder" targetRef="EndEvent_Cancelled" />
+    <bpmn:sequenceFlow id="Flow_Timeout_Reminder" sourceRef="BoundaryEvent_ApprovalTimeout" targetRef="ServiceTask_SendReminder" />
+    <bpmn:sequenceFlow id="Flow_Reminder_End" sourceRef="ServiceTask_SendReminder" targetRef="EndEvent_ReminderSent" />
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_Ecommerce">
+    <bpmndi:BPMNPlane id="BPMNPlane_Ecommerce" bpmnElement="Process_EcommerceOrder">
+      <bpmndi:BPMNShape id="StartEvent_OrderPlaced_di" bpmnElement="StartEvent_OrderPlaced">
+        <dc:Bounds x="162" y="182" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="138" y="225" width="85" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_ReserveStock_di" bpmnElement="ServiceTask_ReserveStock">
+        <dc:Bounds x="250" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_StockAvailable_di" bpmnElement="Gateway_StockAvailable" isMarkerVisible="true">
+        <dc:Bounds x="400" y="175" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="386" y="145" width="79" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="UserTask_ManagerApproval_di" bpmnElement="UserTask_ManagerApproval">
+        <dc:Bounds x="510" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="BoundaryEvent_ApprovalTimeout_di" bpmnElement="BoundaryEvent_ApprovalTimeout">
+        <dc:Bounds x="542" y="142" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="583" y="125" width="85" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_SendReminder_di" bpmnElement="ServiceTask_SendReminder">
+        <dc:Bounds x="680" y="60" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_ChargePayment_di" bpmnElement="ServiceTask_ChargePayment">
+        <dc:Bounds x="670" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="UserTask_WarehousePacking_di" bpmnElement="UserTask_WarehousePacking">
+        <dc:Bounds x="830" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_ShipOrder_di" bpmnElement="ServiceTask_ShipOrder">
+        <dc:Bounds x="990" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Completed_di" bpmnElement="EndEvent_Completed">
+        <dc:Bounds x="1150" y="182" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1128" y="225" width="87" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_CancelOrder_di" bpmnElement="ServiceTask_CancelOrder">
+        <dc:Bounds x="510" y="320" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Cancelled_di" bpmnElement="EndEvent_Cancelled">
+        <dc:Bounds x="670" y="342" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="651" y="385" width="78" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_ReminderSent_di" bpmnElement="EndEvent_ReminderSent">
+        <dc:Bounds x="840" y="82" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="821" y="125" width="79" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNEdge id="Flow_Start_Reserve_di" bpmnElement="Flow_Start_Reserve">
+        <di:waypoint x="198" y="200" />
+        <di:waypoint x="250" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Reserve_Gateway_di" bpmnElement="Flow_Reserve_Gateway">
+        <di:waypoint x="350" y="200" />
+        <di:waypoint x="400" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_InStock_Approval_di" bpmnElement="Flow_InStock_Approval">
+        <di:waypoint x="450" y="200" />
+        <di:waypoint x="510" y="200" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="455" y="178" width="55" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_OutOfStock_Cancel_di" bpmnElement="Flow_OutOfStock_Cancel">
+        <di:waypoint x="425" y="225" />
+        <di:waypoint x="425" y="360" />
+        <di:waypoint x="510" y="360" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="433" y="270" width="48" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Approval_Charge_di" bpmnElement="Flow_Approval_Charge">
+        <di:waypoint x="610" y="200" />
+        <di:waypoint x="670" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Charge_Packing_di" bpmnElement="Flow_Charge_Packing">
+        <di:waypoint x="770" y="200" />
+        <di:waypoint x="830" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Packing_Ship_di" bpmnElement="Flow_Packing_Ship">
+        <di:waypoint x="930" y="200" />
+        <di:waypoint x="990" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Ship_Completed_di" bpmnElement="Flow_Ship_Completed">
+        <di:waypoint x="1090" y="200" />
+        <di:waypoint x="1150" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Cancel_End_di" bpmnElement="Flow_Cancel_End">
+        <di:waypoint x="610" y="360" />
+        <di:waypoint x="670" y="360" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Timeout_Reminder_di" bpmnElement="Flow_Timeout_Reminder">
+        <di:waypoint x="560" y="142" />
+        <di:waypoint x="560" y="100" />
+        <di:waypoint x="680" y="100" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Reminder_End_di" bpmnElement="Flow_Reminder_End">
+        <di:waypoint x="780" y="100" />
+        <di:waypoint x="840" y="100" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

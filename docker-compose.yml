@@ -1,0 +1,21 @@
+services:
+  camunda:
+    image: camunda/camunda-bpm-platform:run-7.24.0
+    container_name: komlay-camunda
+    ports:
+      - "8080:8080"
+    environment:
+      CAMUNDA_BPM_RUN_EXAMPLE_ENABLED: "false"
+    volumes:
+      - ./userlib/camunda-connect-connectors-all-7.24.0.jar:/camunda/configuration/userlib/camunda-connect-connectors-all-7.24.0.jar:ro
+    depends_on:
+      - mock-api
+
+  mock-api:
+    image: python:3.12-alpine
+    container_name: komlay-mock-api
+    command: ["python", "/app/mock_service.py"]
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./mock_service.py:/app/mock_service.py:ro
