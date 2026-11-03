@@ -116,12 +116,11 @@ def start_order(order_id, stock):
         "amount": {"value": 150000, "type": "Double"},
         "stockAvailable": {"value": stock, "type": "Boolean"},
     }
-    status, result = http("POST", "/message", {
-        "messageName": "orderPlaced",
+    status, result = http("POST", "/process-definition/key/Process_EcommerceOrder/start", {
         "businessKey": order_id,
-        "processVariables": variables,
+        "variables": variables,
     })
-    assert status == 204, f"Start message gagal ({status}): {result}"
+    assert status == 200, f"Start process gagal ({status}): {result}"
     proc = wait_instance(order_id)
     print(f"[✓] Instance {order_id} dibuat (pid {proc['id'][:8]}..., stok={stock})")
     return proc

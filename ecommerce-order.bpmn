@@ -9,7 +9,10 @@
                   targetNamespace="http://bpmn.io/schema/bpmn"
                   exporter="Camunda Modeler"
                   exporterVersion="5.0.0">
-  <bpmn:message id="Message_OrderPlaced" name="orderPlaced" />
+  <bpmn:collaboration id="Collaboration_Ecommerce">
+    <bpmn:participant id="Participant_Ecommerce" name="Manajer Pesanan"
+                      processRef="Process_EcommerceOrder" />
+  </bpmn:collaboration>
 
   <bpmn:process id="Process_EcommerceOrder" name="E-Commerce Order Fulfillment"
                 isExecutable="true" camunda:historyTimeToLive="30">
@@ -21,7 +24,6 @@
 
     <bpmn:startEvent id="StartEvent_OrderPlaced" name="Pesanan diterima">
       <bpmn:outgoing>Flow_Start_Reserve</bpmn:outgoing>
-      <bpmn:messageEventDefinition id="MessageEventDefinition_OrderPlaced" messageRef="Message_OrderPlaced" />
     </bpmn:startEvent>
 
     <bpmn:serviceTask id="ServiceTask_ReserveStock" name="Reservasi stok">
@@ -188,7 +190,10 @@
   </bpmn:process>
 
   <bpmndi:BPMNDiagram id="BPMNDiagram_Ecommerce">
-    <bpmndi:BPMNPlane id="BPMNPlane_Ecommerce" bpmnElement="Process_EcommerceOrder">
+    <bpmndi:BPMNPlane id="BPMNPlane_Ecommerce" bpmnElement="Collaboration_Ecommerce">
+      <bpmndi:BPMNShape id="Participant_Ecommerce_di" bpmnElement="Participant_Ecommerce" isHorizontal="true">
+        <dc:Bounds x="90" y="20" width="1160" height="430" />
+      </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="StartEvent_OrderPlaced_di" bpmnElement="StartEvent_OrderPlaced">
         <dc:Bounds x="162" y="182" width="36" height="36" />
         <bpmndi:BPMNLabel>
