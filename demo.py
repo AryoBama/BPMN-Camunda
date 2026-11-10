@@ -201,9 +201,6 @@ def main():
     approval = wait_task(proc["id"], "UserTask_ManagerApproval")
     print(f"[..] Menunggu human task: {approval['name']} (assignee: {approval['assignee']})")
     complete(approval, {"approved": {"value": True, "type": "Boolean"}})
-    packing = wait_task(proc["id"], "UserTask_WarehousePacking")
-    print(f"[..] Menunggu human task: {packing['name']} (assignee: {packing['assignee']})")
-    complete(packing)
     wait_ended(proc["id"])
     ends = end_events(proc["id"])
     assert "EndEvent_Completed" in ends, f"End event salah: {ends}"
@@ -235,8 +232,6 @@ def main():
     assert http("GET", f"/task/{approval['id']}")[0] == 200, "Timer seharusnya non-interrupting"
     print("[✓] Pengingat terkirim, task approval tetap aktif (non-interrupting)")
     complete(approval, {"approved": {"value": True, "type": "Boolean"}})
-    packing = wait_task(proc["id"], "UserTask_WarehousePacking")
-    complete(packing)
     wait_ended(proc["id"])
     ends = end_events(proc["id"])
     assert "EndEvent_Completed" in ends, f"Proses utama tidak selesai: {ends}"
