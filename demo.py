@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Deploy + jalankan demo BPMN "E-Commerce Order Fulfillment" di Camunda 7.
 
-Jalankan: python3 demo.py
+Jalankan pengujian: python3 demo.py
+Jalankan lewat Tasklist: python3 demo.py --interactive
 Script ini akan menyalakan docker compose (Camunda Run + mock web service),
-men-deploy ecommerce-order.bpmn, lalu menguji 3 skenario:
-  1. stok tersedia  -> approval -> pembayaran -> pengemasan -> pengiriman
-  2. stok habis     -> gateway memilih jalur pembatalan
-  3. timer 20 detik -> pengingat approval terkirim (non-interrupting)
+men-deploy ecommerce-order.bpmn, lalu menguji 6 skenario:
+  1. disetujui -> pembayaran -> invoice || kemas + konfirmasi + QC -> booking
+  2. ditolak manajer -> pelepasan reservasi -> dibatalkan
+  3. stok habis -> pelepasan reservasi -> dibatalkan
+  4. timer 20 detik -> pengingat (non-interrupting) -> persetujuan -> booking
+  5. inspeksi gagal sekali -> kemas ulang -> inspeksi lolos -> booking
+  6. inspeksi gagal dua kali -> dua putaran rework -> inspeksi lolos -> booking
 """
+import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -25,7 +31,7 @@ JAR_URL = ("https://repo1.maven.org/maven2/org/camunda/connect/"
            "camunda-connect-connectors-all/7.24.0/"
            "camunda-connect-connectors-all-7.24.0.jar")
 ENGINE = "http://localhost:8080/engine-rest"
-MOCK = "http://localhost:8081"
+MOCK = f"http://localhost:{os.environ.get('MOCK_API_PORT', '18081')}"
 
 
 def parse(raw):
@@ -62,6 +68,14 @@ def engine_up():
         return False
 
 
+def mock_up():
+    try:
+        status, data = http("GET", "/health", base=MOCK, timeout=3)
+        return status == 200 and isinstance(data, dict) and data.get("service") == "mock-api"
+    except RuntimeError:
+        return False
+
+
 def wait_engine(timeout=180):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -71,9 +85,21 @@ def wait_engine(timeout=180):
     raise RuntimeError("Camunda tidak siap setelah 3 menit. Cek: docker compose logs camunda")
 
 
+def wait_mock(timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if mock_up():
+            return
+        time.sleep(1)
+    raise RuntimeError(
+        f"Mock API tidak siap di {MOCK}. Cek: docker compose logs mock-api. "
+        "Jika port dipakai aplikasi lain, atur MOCK_API_PORT ke port kosong lalu jalankan ulang."
+    )
+
+
 def ensure_stack():
-    if engine_up():
-        print("[i] Camunda sudah berjalan.")
+    if engine_up() and mock_up():
+        print("[i] Camunda dan mock API sudah berjalan.")
         return
     if not JAR.exists():
         print("[i] Mengunduh HTTP connector Camunda...")
@@ -82,6 +108,7 @@ def ensure_stack():
     print("[i] Menjalankan Camunda Run + mock API (docker compose)...")
     subprocess.run(["docker", "compose", "up", "-d"], cwd=ROOT, check=True)
     wait_engine()
+    wait_mock()
 
 
 def deploy():
@@ -108,14 +135,20 @@ def deploy():
     return definition["id"]
 
 
-def start_order(order_id, stock):
+def start_order(order_id, stock, manager_user=None, warehouse_user=None, inspector_user=None):
     variables = {
         "orderId": {"value": order_id, "type": "String"},
         "sku": {"value": "SKU-001", "type": "String"},
         "qty": {"value": 2, "type": "Integer"},
         "amount": {"value": 150000, "type": "Double"},
         "stockAvailable": {"value": stock, "type": "Boolean"},
+        "approved": {"value": False, "type": "Boolean"},
+        "qualityPassed": {"value": False, "type": "Boolean"},
     }
+    for name, value in (("managerUser", manager_user), ("warehouseUser", warehouse_user),
+                        ("inspectorUser", inspector_user)):
+        if value is not None:
+            variables[name] = {"value": value, "type": "String"}
     status, result = http("POST", "/process-definition/key/Process_EcommerceOrder/start", {
         "businessKey": order_id,
         "variables": variables,
@@ -154,7 +187,7 @@ def complete(task, variables=None):
     status, result = http("POST", f"/task/{task['id']}/complete",
                           {"variables": variables or {}})
     assert status == 204, f"Complete task gagal ({status}): {result}"
-    print(f"[✓] Human task selesai: {task['name']} ({task['taskDefinitionKey']})")
+    print(f"[✓] User task selesai: {task['name']} ({task['taskDefinitionKey']})")
 
 
 def wait_ended(pid, timeout=20):
@@ -167,11 +200,15 @@ def wait_ended(pid, timeout=20):
     raise RuntimeError(f"Instance {pid} belum selesai")
 
 
-def end_events(pid):
+def activity_history(pid):
     status, activities = http("GET", f"/history/activity-instance?processInstanceId={pid}")
     assert status == 200, f"Query history aktivitas gagal ({status}): {activities}"
+    return activities
+
+
+def end_events(pid):
     ends = {"EndEvent_Completed", "EndEvent_Cancelled", "EndEvent_ReminderSent"}
-    return [item.get("activityId") for item in activities if item.get("activityId") in ends]
+    return [item.get("activityId") for item in activity_history(pid) if item.get("activityId") in ends]
 
 
 def calls_for(order_id):
@@ -180,62 +217,175 @@ def calls_for(order_id):
     return [c for c in data["calls"] if (c.get("payload") or {}).get("orderId") == order_id]
 
 
-def expect_calls(order_id, expected):
+def expect_calls(order_id, expected, forbidden=()):
     paths = {call["path"] for call in calls_for(order_id)}
     missing = set(expected) - paths
     assert not missing, f"Web service tidak terpanggil: {missing} (dipanggil: {paths})"
+    unexpected = set(forbidden) & paths
+    assert not unexpected, f"Web service seharusnya tidak terpanggil: {unexpected}"
     print(f"[✓] Web service terpanggil: {', '.join(sorted(expected))}")
 
 
+def expect_quality_wait(pid, order_id):
+    expect_calls(order_id, ["/inventory/reserve", "/payment/charge", "/invoice/create"],
+                 forbidden=["/shipment/book", "/inventory/release"])
+    paths = [call["path"] for call in calls_for(order_id)]
+    for path in ("/inventory/reserve", "/payment/charge", "/invoice/create"):
+        assert paths.count(path) == 1, f"Rework tidak boleh mengulang {path}: {paths}"
+    activities = activity_history(pid)
+    assert len([a for a in activities if a["activityId"] == "ServiceTask_CreateInvoice" and a["endTime"]]) == 1
+    assert any(a["activityId"] == "Gateway_OrderReady" and not a["endTime"] for a in activities), \
+        "Parallel join harus menunggu hasil QC yang lolos"
+    return activities
+
+
+def finish_packing(pid, order_id, inspection_results=(True,)):
+    assert inspection_results and inspection_results[-1] is True, "Skenario harus berakhir dengan QC lolos"
+    assert all(result is False for result in inspection_results[:-1]), "Hasil sebelum akhir harus gagal"
+    confirmations, inspections = set(), set()
+    for attempt, quality_passed in enumerate(inspection_results, 1):
+        packing = wait_task(pid, "UserTask_WarehouseConfirmation")
+        assert packing["assignee"] == "demo", packing
+        assert packing["id"] not in confirmations, "Setiap rework harus membuat task konfirmasi baru"
+        confirmations.add(packing["id"])
+        activities = expect_quality_wait(pid, order_id)
+        assert len([a for a in activities if a["activityId"] == "ManualTask_WarehousePacking"
+                    and a["activityType"] == "manualTask" and a["endTime"]]) == attempt
+        if attempt == 1:
+            status, variable = http("GET", f"/process-instance/{pid}/variables/invoiceResponse")
+            assert status == 200, f"Respons invoice tidak tersimpan ({status}): {variable}"
+            invoice = json.loads(variable["value"])
+            assert invoice["orderId"] == order_id and invoice["invoiceId"] == f"INV-{order_id}", invoice
+        else:
+            # Sengaja simulasikan nilai lama true untuk menguji reset saat QC berikutnya dimulai.
+            status, result = http("PUT", f"/process-instance/{pid}/variables/qualityPassed",
+                                  {"value": True, "type": "Boolean"})
+            assert status == 204, result
+        print(f"[i] Putaran {attempt}: demo mensimulasikan pengemasan fisik telah selesai.")
+        complete(packing)
+        inspection = wait_task(pid, "UserTask_QualityInspection")
+        assert inspection["assignee"] == "demo", inspection
+        assert inspection["id"] not in inspections, "Setiap putaran harus membuat task QC baru"
+        inspections.add(inspection["id"])
+        status, variables = http("GET", f"/task/{inspection['id']}/form-variables?variableNames=qualityPassed")
+        assert status == 200, variables
+        assert variables["qualityPassed"]["type"] == "Boolean" and variables["qualityPassed"]["value"] is False, \
+            "Form inspeksi baru harus mulai dari belum lolos, termasuk setelah nilai lama true"
+        activities = expect_quality_wait(pid, order_id)
+        assert len([a for a in activities if a["activityId"] == "ManualTask_InspectPackaging"
+                    and a["activityType"] == "manualTask" and a["endTime"]]) == attempt
+        print(f"[i] Putaran {attempt}: demo mensimulasikan inspeksi fisik; hasil={'lolos' if quality_passed else 'perlu perbaikan'}.")
+        complete(inspection, {"qualityPassed": {"value": quality_passed, "type": "Boolean"}})
+        if not quality_passed:
+            rework = wait_task(pid, "UserTask_WarehouseConfirmation")
+            assert rework["id"] not in confirmations, rework
+            expect_quality_wait(pid, order_id)
+            print("[✓] QC gagal: kembali ke gudang, booking tetap tertahan.")
+    wait_ended(pid)
+    ends = end_events(pid)
+    assert "EndEvent_Completed" in ends and "EndEvent_Cancelled" not in ends, f"End event salah: {ends}"
+    expect_calls(order_id, ["/inventory/reserve", "/payment/charge", "/invoice/create", "/shipment/book"],
+                 forbidden=["/inventory/release"])
+    paths = [call["path"] for call in calls_for(order_id)]
+    for path in ("/inventory/reserve", "/payment/charge", "/invoice/create", "/shipment/book"):
+        assert paths.count(path) == 1, f"API harus dipanggil tepat sekali: {path}, {paths}"
+    activities = activity_history(pid)
+    for activity_id in ("ManualTask_WarehousePacking", "UserTask_WarehouseConfirmation",
+                        "ManualTask_InspectPackaging", "UserTask_QualityInspection"):
+        assert len([a for a in activities if a["activityId"] == activity_id and a["endTime"]]) == len(inspection_results), \
+            f"Jumlah putaran tidak sesuai untuk {activity_id}"
+    print(f"[✓] Pengiriman {order_id} terjadwal (EndEvent_Completed)")
+
+
+def verify_cancelled(pid, order_id, reason):
+    wait_ended(pid)
+    ends = end_events(pid)
+    assert "EndEvent_Cancelled" in ends and "EndEvent_Completed" not in ends, f"End event salah: {ends}"
+    expect_calls(order_id, ["/inventory/reserve", "/inventory/release"],
+                 forbidden=["/payment/charge", "/invoice/create", "/shipment/book"])
+    releases = [c for c in calls_for(order_id) if c["path"] == "/inventory/release"]
+    assert len(releases) == 1 and releases[0]["payload"]["reason"] == reason, releases
+    status, tasks = http("GET", f"/task?processInstanceId={pid}")
+    assert status == 200 and not tasks, f"Pesanan dibatalkan tidak boleh menyisakan user task: {tasks}"
+    print(f"[✓] Pesanan {order_id} dibatalkan ({reason})")
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--interactive", action="store_true",
+                        help="Mulai satu pesanan dan biarkan user task diselesaikan lewat Tasklist.")
+    args = parser.parse_args()
     if not BPMN.exists():
         sys.exit(f"File BPMN tidak ditemukan: {BPMN}")
     ensure_stack()
     deploy()
-    suffix = int(time.time())
+    suffix = f"{int(time.time())}-{uuid.uuid4().hex[:6]}"
 
-    print("\n=== Skenario 1: stok tersedia, pesanan diproses penuh ===")
+    if args.interactive:
+        order_id = f"ORD-{suffix}-MANUAL"
+        proc = start_order(order_id, stock=True)
+        approval = wait_task(proc["id"], "UserTask_ManagerApproval")
+        assert approval["assignee"] == "demo", approval
+        print(f"[✓] Instance tetap aktif: {order_id} (pid {proc['id']})")
+        print("Login demo / demo. Buka task Persetujuan manajer pada tab Form.")
+        print("Centang Setujui pesanan untuk menyetujui; tidak dicentang berarti menolak. Klik Complete.")
+        print("Jika disetujui, kemas barang secara fisik lalu selesaikan Konfirmasi pengemasan selesai.")
+        print("Petugas QC memeriksa kemasan, lalu mencatat hasil pada task Catat hasil inspeksi.")
+        print("Centang Inspeksi lulus untuk melanjutkan; tidak dicentang mengembalikan pekerjaan ke gudang.")
+        print("Ulangi pengemasan, konfirmasi, dan inspeksi sampai lolos. Semua peran demo memakai akun demo.")
+        print(f"Tasklist: http://localhost:8080/camunda/app/tasklist/default/#/?task={approval['id']}")
+        print(f"Cockpit : http://localhost:8080/camunda/app/cockpit/default/#/process-instance/{proc['id']}")
+        return
+
+    print("\n=== Skenario 1: disetujui, invoice dan pengemasan paralel ===")
     order_id = f"ORD-{suffix}-A"
     proc = start_order(order_id, stock=True)
     approval = wait_task(proc["id"], "UserTask_ManagerApproval")
-    print(f"[..] Menunggu human task: {approval['name']} (assignee: {approval['assignee']})")
+    assert approval["assignee"] == "demo", approval
     complete(approval, {"approved": {"value": True, "type": "Boolean"}})
-    wait_ended(proc["id"])
-    ends = end_events(proc["id"])
-    assert "EndEvent_Completed" in ends, f"End event salah: {ends}"
-    expect_calls(order_id, ["/inventory/reserve", "/payment/charge", "/shipment/book"])
-    print(f"[✓] Pesanan {order_id} selesai (EndEvent_Completed)")
+    finish_packing(proc["id"], order_id)
 
-    print("\n=== Skenario 2: stok habis, gateway membatalkan pesanan ===")
+    print("\n=== Skenario 2: manajer menolak pesanan ===")
     order_id = f"ORD-{suffix}-B"
-    proc = start_order(order_id, stock=False)
-    wait_ended(proc["id"])
-    ends = end_events(proc["id"])
-    assert "EndEvent_Cancelled" in ends, f"End event salah: {ends}"
-    expect_calls(order_id, ["/inventory/reserve", "/inventory/release"])
-    print(f"[✓] Pesanan {order_id} dibatalkan (EndEvent_Cancelled)")
+    proc = start_order(order_id, stock=True)
+    approval = wait_task(proc["id"], "UserTask_ManagerApproval")
+    complete(approval, {"approved": {"value": False, "type": "Boolean"}})
+    verify_cancelled(proc["id"], order_id, "ditolak-manajer")
 
-    print("\n=== Skenario 3: timer 20 detik mengirim pengingat approval ===")
+    print("\n=== Skenario 3: stok habis, gateway membatalkan pesanan ===")
     order_id = f"ORD-{suffix}-C"
+    proc = start_order(order_id, stock=False)
+    verify_cancelled(proc["id"], order_id, "stok-habis")
+
+    print("\n=== Skenario 4: timer 20 detik mengirim pengingat approval ===")
+    order_id = f"ORD-{suffix}-D"
     proc = start_order(order_id, stock=True)
     approval = wait_task(proc["id"], "UserTask_ManagerApproval")
     print("[..] Menunggu timer boundary event (job executor Camunda bisa delay hingga ~60 detik)...")
     deadline = time.time() + 90
     while time.time() < deadline:
-        if any(call["path"] == "/notification/reminder" for call in calls_for(order_id)):
+        if (any(call["path"] == "/notification/reminder" for call in calls_for(order_id))
+                and "EndEvent_ReminderSent" in end_events(proc["id"])):
             break
         time.sleep(2)
+    else:
+        raise RuntimeError("Jalur pengingat tidak selesai dalam 90 detik")
     expect_calls(order_id, ["/notification/reminder"])
     ends = end_events(proc["id"])
     assert "EndEvent_ReminderSent" in ends, f"Jalur timer tidak selesai: {ends}"
     assert http("GET", f"/task/{approval['id']}")[0] == 200, "Timer seharusnya non-interrupting"
     print("[✓] Pengingat terkirim, task approval tetap aktif (non-interrupting)")
     complete(approval, {"approved": {"value": True, "type": "Boolean"}})
-    wait_ended(proc["id"])
-    ends = end_events(proc["id"])
-    assert "EndEvent_Completed" in ends, f"Proses utama tidak selesai: {ends}"
-    expect_calls(order_id, ["/inventory/reserve", "/payment/charge", "/shipment/book", "/notification/reminder"])
-    print(f"[✓] Pesanan {order_id} selesai setelah approval")
+    finish_packing(proc["id"], order_id)
+
+    for number, results in ((5, (False, True)), (6, (False, False, True))):
+        failures = len(results) - 1
+        print(f"\n=== Skenario {number}: QC gagal {failures} kali, lalu rework hingga lolos ===")
+        order_id = f"ORD-{suffix}-REWORK-{failures}"
+        proc = start_order(order_id, stock=True)
+        approval = wait_task(proc["id"], "UserTask_ManagerApproval")
+        complete(approval, {"approved": {"value": True, "type": "Boolean"}})
+        finish_packing(proc["id"], order_id, inspection_results=results)
 
     print("\n=== SEMUA SKENARIO LULUS ===")
     print("Cockpit : http://localhost:8080/camunda/app/cockpit  (login: demo / demo)")
