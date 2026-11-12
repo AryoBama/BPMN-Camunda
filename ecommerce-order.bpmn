@@ -18,8 +18,9 @@
                 isExecutable="true" camunda:historyTimeToLive="30">
     <bpmn:documentation>
       Proses fulfillment pesanan e-commerce: reservasi stok (web service),
-      persetujuan manajer (human task) dengan timer pengingat, pembayaran,
-      pengemasan, dan pengiriman. Termasuk exclusive gateway untuk stok habis.
+      persetujuan manajer (user task) dengan timer pengingat, pembayaran,
+      pengemasan fisik (manual task), dan pengiriman. Termasuk exclusive gateway
+      untuk stok habis.
     </bpmn:documentation>
 
     <bpmn:startEvent id="StartEvent_OrderPlaced" name="Pesanan diterima">
@@ -55,7 +56,7 @@
     </bpmn:exclusiveGateway>
 
     <bpmn:userTask id="UserTask_ManagerApproval" name="Persetujuan manajer" camunda:assignee="manager">
-      <bpmn:documentation>Human task: manajer menyetujui pesanan bernilai tinggi. Jika 20 detik tidak direspons, timer mengirim pengingat.</bpmn:documentation>
+      <bpmn:documentation>User task: manajer menyetujui pesanan melalui Tasklist. Jika 20 detik tidak direspons, timer mengirim pengingat.</bpmn:documentation>
       <bpmn:incoming>Flow_InStock_Approval</bpmn:incoming>
       <bpmn:outgoing>Flow_Approval_Charge</bpmn:outgoing>
     </bpmn:userTask>
@@ -112,11 +113,11 @@
       <bpmn:outgoing>Flow_Charge_Packing</bpmn:outgoing>
     </bpmn:serviceTask>
 
-    <bpmn:userTask id="UserTask_WarehousePacking" name="Pengemasan barang" camunda:assignee="warehouse">
-      <bpmn:documentation>Human task: staf gudang mengemas barang dan menandai pesanan siap kirim.</bpmn:documentation>
+    <bpmn:manualTask id="ManualTask_WarehousePacking" name="Pengemasan barang">
+      <bpmn:documentation>Manual task: staf gudang mengemas barang di luar sistem. Camunda tidak menunggu atau melacak penyelesaian langkah ini.</bpmn:documentation>
       <bpmn:incoming>Flow_Charge_Packing</bpmn:incoming>
       <bpmn:outgoing>Flow_Packing_Ship</bpmn:outgoing>
-    </bpmn:userTask>
+    </bpmn:manualTask>
 
     <bpmn:serviceTask id="ServiceTask_ShipOrder" name="Pengiriman pesanan">
       <bpmn:documentation>Web service task: membuat booking pengiriman di logistik.</bpmn:documentation>
@@ -181,8 +182,8 @@
     </bpmn:sequenceFlow>
     <bpmn:sequenceFlow id="Flow_OutOfStock_Cancel" name="Stok habis" sourceRef="Gateway_StockAvailable" targetRef="ServiceTask_CancelOrder" />
     <bpmn:sequenceFlow id="Flow_Approval_Charge" sourceRef="UserTask_ManagerApproval" targetRef="ServiceTask_ChargePayment" />
-    <bpmn:sequenceFlow id="Flow_Charge_Packing" sourceRef="ServiceTask_ChargePayment" targetRef="UserTask_WarehousePacking" />
-    <bpmn:sequenceFlow id="Flow_Packing_Ship" sourceRef="UserTask_WarehousePacking" targetRef="ServiceTask_ShipOrder" />
+    <bpmn:sequenceFlow id="Flow_Charge_Packing" sourceRef="ServiceTask_ChargePayment" targetRef="ManualTask_WarehousePacking" />
+    <bpmn:sequenceFlow id="Flow_Packing_Ship" sourceRef="ManualTask_WarehousePacking" targetRef="ServiceTask_ShipOrder" />
     <bpmn:sequenceFlow id="Flow_Ship_Completed" sourceRef="ServiceTask_ShipOrder" targetRef="EndEvent_Completed" />
     <bpmn:sequenceFlow id="Flow_Cancel_End" sourceRef="ServiceTask_CancelOrder" targetRef="EndEvent_Cancelled" />
     <bpmn:sequenceFlow id="Flow_Timeout_Reminder" sourceRef="BoundaryEvent_ApprovalTimeout" targetRef="ServiceTask_SendReminder" />
@@ -224,7 +225,7 @@
       <bpmndi:BPMNShape id="ServiceTask_ChargePayment_di" bpmnElement="ServiceTask_ChargePayment">
         <dc:Bounds x="670" y="160" width="100" height="80" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="UserTask_WarehousePacking_di" bpmnElement="UserTask_WarehousePacking">
+      <bpmndi:BPMNShape id="ManualTask_WarehousePacking_di" bpmnElement="ManualTask_WarehousePacking">
         <dc:Bounds x="830" y="160" width="100" height="80" />
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="ServiceTask_ShipOrder_di" bpmnElement="ServiceTask_ShipOrder">

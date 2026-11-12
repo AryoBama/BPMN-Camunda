@@ -9,10 +9,10 @@ lokal.
 
 | Syarat | Implementasi |
 |---|---|
-| Minimal 5 aktivitas | **7 aktivitas**: 5 service task + 2 human task |
+| Minimal 5 aktivitas | **7 aktivitas**: 5 service task + 1 user task + 1 manual task |
 | Web service task | `Reservasi stok`, `Proses pembayaran`, `Pengiriman pesanan`, `Batalkan pesanan`, `Kirim pengingat approval` (HTTP connector) |
-| Human task | `Persetujuan manajer` (assignee `manager`), `Pengemasan barang` (assignee `warehouse`) |
-| Minimal 1 event | Message start event `orderPlaced` + timer boundary event `PT20S` |
+| Task dengan pelaku manusia | `Persetujuan manajer` adalah user task; `Pengemasan barang` adalah manual task |
+| Minimal 1 event | None start event `Pesanan diterima` + timer boundary event `PT20S` |
 | Minimal 1 gateway | Exclusive gateway `Stok tersedia?` dengan dua jalur |
 | Deploy & run | `demo.py` men-deploy BPMN dan menjalankan 3 skenario uji di engine |
 
@@ -20,15 +20,15 @@ lokal.
 
 ```mermaid
 flowchart LR
-    S((Pesanan diterima<br/>message)) --> R[Reservasi stok<br/>service]
+    S((Pesanan diterima)) --> R[Reservasi stok<br/>service]
     R --> G{Stok tersedia?}
-    G -- ya --> A[Persetujuan manajer<br/>human task]
+    G -- ya --> A[Persetujuan manajer<br/>user task]
     G -- tidak --> C[Batalkan pesanan<br/>service]
     C --> EC((Pesanan dibatalkan))
     A -. timer 20 dtk .-> T[Kirim pengingat<br/>service]
     T --> ET((Pengingat terkirim))
     A --> P[Proses pembayaran<br/>service]
-    P --> W[Pengemasan barang<br/>human task]
+    P --> W[Pengemasan barang<br/>manual task]
     W --> D[Pengiriman pesanan<br/>service]
     D --> E((Pesanan selesai))
 ```
@@ -79,12 +79,14 @@ docker compose down
 | Mock API | http://localhost:8081/calls | — |
 
 Di Tasklist, buka filter **All tasks** untuk melihat `Persetujuan manajer`
-(assignee `manager`) dan `Pengemasan barang` (assignee `warehouse`).
+(assignee `manager`). `Pengemasan barang` tampil di diagram dengan ikon tangan,
+tetapi tidak muncul di Tasklist. Camunda melewati manual task secara otomatis,
+sehingga pengiriman dalam demo ini langsung diproses setelah pembayaran.
 
 ## Skenario pengujian
 
-`demo.py` memulai instance lewat **message start event** `orderPlaced`, bukan
-langsung lewat process key.
+`demo.py` memulai instance langsung lewat process key `Process_EcommerceOrder`
+dengan **none start event** (lingkaran kosong).
 
 | # | Variabel | Alur yang diuji | Hasil yang diverifikasi |
 |---|---|---|---|
@@ -98,7 +100,6 @@ Contoh hasil verifikasi:
 [✓] Deploy berhasil: Process_EcommerceOrder:1:... (v1)
 === Skenario 1: stok tersedia, pesanan diproses penuh ===
 [✓] Human task selesai: Persetujuan manajer (UserTask_ManagerApproval)
-[✓] Human task selesai: Pengemasan barang (UserTask_WarehousePacking)
 [✓] Web service terpanggil: /inventory/reserve, /payment/charge, /shipment/book
 [✓] Pesanan ORD-...-A selesai (EndEvent_Completed)
 === Skenario 2: stok habis, gateway membatalkan pesanan ===
